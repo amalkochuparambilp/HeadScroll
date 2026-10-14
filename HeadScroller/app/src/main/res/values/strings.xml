@@ -13,3 +13,4 @@
     <string name="accessibility_service_description">Head Scroller Accessibility Service</string>
     <string name="service_active">Head tracking active</string>
     <string name="service_inactive">Head tracking inactive</string>
+</resources>
