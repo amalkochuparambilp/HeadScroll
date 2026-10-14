@@ -1,10 +1,12 @@
-name: Android CI
+name: Build Release APK
 
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,11 +25,20 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x HeadScroller/gradlew
 
-      - name: Build with Gradle
-        run: ./HeadScroller/gradlew -p HeadScroller build
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > HeadScroller/app/keystore.jks
+          echo "KEYSTORE_PATH=HeadScroller/app/keystore.jks" >> $GITHUB_ENV
 
-      - name: Upload APK
+      - name: Build Release APK
+        run: ./HeadScroller/gradlew -p HeadScroller assembleRelease
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: HeadScroller/app/build/outputs/apk/debug/app-debug.apk
+          name: app-release
+          path: HeadScroller/app/build/outputs/apk/release/app-release.apk
