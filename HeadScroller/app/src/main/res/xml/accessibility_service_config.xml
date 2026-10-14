@@ -1,5 +1,5 @@
 <accessibilityservice xmlns:android="http://schemas.android.com/apk/res/android"
-    android:description="@string/accessibility_description"
+    android:description="@string/accessibility_service_description"
     android:packageNames="com.headscroller.headscroller"
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"

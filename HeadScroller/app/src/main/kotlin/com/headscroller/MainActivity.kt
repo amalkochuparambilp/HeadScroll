@@ -59,12 +59,12 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Please calibrate first", Toast.LENGTH_SHORT).show()
             return
         }
-        if (checkPermission(Manifest.permission.CAMERA)) {
+        if (checkPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             isTracking = true
-            btnToggle.text = R.string.stop_head_tracking
-            tvStatus.text = R.string.service_active
+            btnToggle.setText(R.string.stop_head_tracking)
+            tvStatus.setText(R.string.service_active)
             tvStatus.setTextColor(ContextCompat.getColor(this, android.R.color.holo_green_dark))
-            startService(Intent(this, HeadTrackingService::class.java))
+            ContextCompat.startForegroundService(this, Intent(this, HeadTrackingService::class.java))
         } else {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), 1)
         }
@@ -72,8 +72,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTracking() {
         isTracking = false
-        btnToggle.text = R.string.toggle_head_tracking
-        tvStatus.text = R.string.service_inactive
+        btnToggle.setText(R.string.toggle_head_tracking)
+        tvStatus.setText(R.string.service_inactive)
         tvStatus.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark))
         stopService(Intent(this, HeadTrackingService::class.java))
     }

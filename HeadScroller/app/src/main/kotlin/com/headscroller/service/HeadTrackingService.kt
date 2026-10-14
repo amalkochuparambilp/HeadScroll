@@ -1,185 +1,188 @@
 package com.headscroller.headscroller.service
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
-import android.hardware.camera2.params.CaptureRequest
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import android.view.SurfaceView
-import androidx.camera.core.*
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import com.google.android.gms.tasks.Task
-import com.google.mlkit.vision.face detection.FaceDetector
-import com.google.mlkit.vision.face detection.FaceDetectorOptions
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import com.headscroller.headscroller.R
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.common.inputmedia.ImageUtils
+import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-// Constants for head tracking
-private val TILT_THRESHOLD_DEGREES = 15.0f
-private val COOLDOWN_MS = 1500
+private const val TILT_THRESHOLD_DEGREES = 15f
+private const val COOLDOWN_MS = 1500L
+private const val CALIBRATION_SAMPLES = 20
+private const val NOTIFICATION_CHANNEL_ID = "head_tracking"
+private const val NOTIFICATION_ID = 1
 
-class HeadTrackingService : Service() {
+class HeadTrackingService : Service(), LifecycleOwner {
 
-    private lateinit var cameraProvider: ProcessCameraProvider
-    private lateinit var faceDetector: FaceDetector
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    override val lifecycle: Lifecycle
+        get() = lifecycleRegistry
+
+    private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
-    private var lastScrollTime = 0L
-    private var isCalibrated = false
-    private var calibratedPitch: Float = 0f
-    private var neutralPitchSamples = mutableListOf<Float>()
-
-    // Executor for camera operations
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val faceDetector: FaceDetector by lazy {
+        FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .build()
+        )
+    }
+
+    private var lastScrollTime = 0L
+    private var calibratedPitch = 0f
+    private val neutralPitchSamples = mutableListOf<Float>()
 
     override fun onCreate() {
         super.onCreate()
-        initFaceDetector()
-    }
-
-    private fun initFaceDetector() {
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.ACCURACY)
-            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
-            .build()
-        faceDetector = FaceDetector.getClient(options)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        startAsForegroundService()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent != null && intent.action == "android.hardware.action.HEAD_TRACKING_CALIBRATE") {
-            calibrateNeutralPosition()
-        } else {
-            startCameraAnalysis()
-        }
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        startCameraAnalysis()
         return START_STICKY
+    }
+
+    private fun startAsForegroundService() {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notificationManager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    getString(R.string.app_name),
+                    NotificationManager.IMPORTANCE_LOW
+                )
+            )
+        }
+
+        val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(getString(R.string.service_active))
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startCameraAnalysis() {
-        val cameraProviderFuture: Task<ProcessCameraProvider> = ProcessCameraProvider.getInstance(this)
-
-        cameraProviderFuture.addListener(Runnable {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                bindCameraPreview()
-            } catch (e: Exception) {
-                Log.e("HeadTracking", "Camera provider error", e)
+                bindCameraAnalysis()
+            } catch (exception: Exception) {
+                Log.e("HeadTracking", "Unable to initialize camera", exception)
+                stopSelf()
             }
         }, ContextCompat.getMainExecutor(this))
-        return START_STICKY
     }
 
-    private fun bindCameraPreview() {
-        // Image analysis use case for ML Kit head tracking
-        imageAnalysis = ImageAnalysis.Builder()
-            .setBackFacingCameraUseCaseDefaults()
-            .build().also { analysis ->
-                analysis.setOnImageFrameListener { image ->
-                    processImageFromMLKit(image)
-                }
+    private fun bindCameraAnalysis() {
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { useCase ->
+                useCase.setAnalyzer(cameraExecutor, ::processImage)
             }
 
-        // Preview use case (minimal - just to keep camera active)
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(SurfaceView(this).surfaceProvider)
-        }
-
-        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
         try {
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            cameraProvider?.unbindAll()
+            cameraProvider?.bindToLifecycle(
                 this,
-                cameraSelector,
-                preview,
-                imageAnalysis
+                CameraSelector.DEFAULT_FRONT_CAMERA,
+                analysis
             )
-        } catch (exc: Exception) {
-            Log.e("HeadTracking", "Use case binding failed", exc)
+            imageAnalysis = analysis
+        } catch (exception: Exception) {
+            Log.e("HeadTracking", "Unable to bind camera analysis", exception)
+            stopSelf()
         }
     }
 
-    private fun processImageFromMLKit(image: ImageProxy?) {
-        if (image == null) return
-
-        val rotation = image.imageInfo.rotationDegrees
-        val mediaImage = image.mediaImage
-        if (mediaImage != null) {
-            val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
-            detectHeadPosition(inputImage)
+    private fun processImage(imageProxy: ImageProxy) {
+        val mediaImage = imageProxy.image
+        if (mediaImage == null) {
+            imageProxy.close()
+            return
         }
-        image.close()
-    }
 
-    private fun detectHeadPosition(mlKitImage: InputImage) {
-        val result = faceDetector.process(mlKitImage)
-        if (result.links.isNotEmpty()) {
-            val face = result.links.first()
-            val pitch = face.headEulerAngleY()  // Up/down tilt in degrees
-
-            if (!isCalibrated) {
-                // Calibration: accumulate samples
-                neutralPitchSamples.add(pitch)
-                if (neutralPitchSamples.size >= CALIBRATION_SAMPLES) {
-                    val avgPitch = neutralPitchSamples.average() ?: 0f
-                    calibratedPitch = avgPitch
-                    isCalibrated = true
-                    Log.d("HeadTracking", "Calibrated pitch: $calibratedPitch")
-                }
-            } else {
-                // Check for tilt gestures
-                checkHeadTilt(pitch)
+        val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        faceDetector.process(inputImage)
+            .addOnSuccessListener(cameraExecutor, ::processFaces)
+            .addOnFailureListener(cameraExecutor) { exception ->
+                Log.e("HeadTracking", "Face detection failed", exception)
             }
-        }
+            .addOnCompleteListener(cameraExecutor) {
+                imageProxy.close()
+            }
     }
 
-    private fun checkHeadTilt(currentPitch: Float) {
-        val delta = currentPitch - calibratedPitch
+    private fun processFaces(faces: List<Face>) {
+        val pitch = faces.firstOrNull()?.headEulerAngleX ?: return
+        if (neutralPitchSamples.size < CALIBRATION_SAMPLES) {
+            neutralPitchSamples.add(pitch)
+            if (neutralPitchSamples.size == CALIBRATION_SAMPLES) {
+                calibratedPitch = neutralPitchSamples.average().toFloat()
+                Log.d("HeadTracking", "Calibrated pitch: $calibratedPitch")
+            }
+            return
+        }
 
-        // Check cooldown
+        val delta = pitch - calibratedPitch
         val now = System.currentTimeMillis()
         if (now - lastScrollTime < COOLDOWN_MS) return
 
-        // Tilt up (positive pitch) = next video
-        if (delta > TILT_THRESHOLD_DEGREES) {
-            triggerScroll("next")
-            lastScrollTime = now
-            Log.d("HeadTracking", "Tilt UP → next video, delta: $delta")
+        val direction = when {
+            delta > TILT_THRESHOLD_DEGREES -> ScrollAccessibilityService.ACTION_NEXT
+            delta < -TILT_THRESHOLD_DEGREES -> ScrollAccessibilityService.ACTION_PREV
+            else -> return
         }
-        // Tilt down (negative pitch) = previous video
-        else if (delta < -TILT_THRESHOLD_DEGREES) {
-            triggerScroll("prev")
-            lastScrollTime = now
-            Log.d("HeadTracking", "Tilt DOWN → prev video, delta: $delta")
-        }
-    }
 
-    private fun triggerScroll(direction: String) {
-        val intent = Intent(this, ScrollAccessibilityService::class.java).apply {
-            putExtra("direction", direction)
+        if (ScrollAccessibilityService.dispatchScroll(direction)) {
+            lastScrollTime = now
         }
-        // Start the accessibility service to dispatch the gesture
-        // We use a local broadcast or direct start - but actually the AccessibilityService
-        // is system-wide, so we need to ensure it's running
-        Log.d("HeadTracking", "Scroll $direction triggered")
-    }
-
-    fun calibrate() {
-        neutralPitchSamples.clear()
-        // Will collect samples from next few frames
-        isCalibrated = false
-        calibratedPitch = 0f
-        Log.d("HeadTracking", "Calibration reset - collecting samples")
     }
 
     override fun onDestroy() {
-        super.onDestroy()
-        imageAnalysis?.setOnImageFrameListener(null)
-        imageAnalysis = null
+        imageAnalysis?.clearAnalyzer()
         cameraProvider?.unbindAll()
+        faceDetector.close()
         cameraExecutor.shutdown()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder {
-        return null
-    }
+    override fun onBind(intent: Intent?): IBinder? = null
 }
