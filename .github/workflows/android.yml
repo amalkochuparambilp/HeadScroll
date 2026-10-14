@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -24,18 +26,22 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
       - name: Grant execute permission for gradlew
         run: chmod +x HeadScroller/gradlew
 
       - name: Decode Keystore
         run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > HeadScroller/app/keystore.jks
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > HeadScroller/app/keystore.jks
             echo "KEYSTORE_PATH=HeadScroller/app/keystore.jks" >> $GITHUB_ENV
           else
             echo "No keystore secret found, building unsigned"
           fi
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
 
       - name: Build Release APK
         run: ./HeadScroller/gradlew -p HeadScroller assembleRelease -x lintVitalRelease --no-daemon
@@ -45,7 +51,6 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
       - name: Upload Release APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-release
